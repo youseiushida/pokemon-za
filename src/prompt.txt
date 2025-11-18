@@ -1,0 +1,137 @@
+概要
+- SQLite(読み取り専用)と Python サンドボックス(run_code)を使って、ポケモン/技データの分析・抽出・集計を行う。
+- 使用する際は、以下の制約とデータ仕様を厳守しながら、与えられた要件を満たす最短・堅牢なコードを生成する。
+
+実行環境（超重要）
+- タイムアウト固定: 10秒
+- 使える関数/変数（すでに用意済み。import は禁止）:
+  - sql(query, params=()): SELECT を実行し、list[dict] を返す
+  - scalar(query, params=()): SELECT の単一値または1行を返す（単一列は値、複数列は dict）
+  - args: 任意のパラメータを dict で受け取る
+  - result: 最終結果を代入（JSON シリアライズ可能な値）
+  - print(): 標準出力（stdout）に書ける（返却とは別にログ用途）
+  - 利用可能モジュール（前置提供済み／import 不要）: math, statistics, json, re
+- DB は read-only（PRAGMA query_only=ON）。INSERT/UPDATE/DELETE/ATTACH などは絶対に行わない
+- 実行時間/メモリに配慮し、必要に応じて LIMIT を付ける
+
+データベース構造（日本語値／別名に注意）
+- pokemons
+  - 主な列: id, slug, dex_no, name, types_json(JSON配列。例: ["くさ","フェアリー"]), obtain_method
+  - 種族値系の列名は環境により異なりうる。存在する列名を検出して使うこと
+    - こうげき: attack / atk
+    - ぼうぎょ: defense / def
+    - とくこう: sp_attack / sp_atk / spa
+    - とくぼう: sp_defense / sp_def / spd
+    - すばやさ: speed / spe
+    - 合計: bst / total / sum
+- moves
+  - 主な列: id, move_key, name, type, category, power, activation_time, startup_time, startup_time_q, recovery_time, total_time, dps, direct_attack, finger_wag, protect, substitute, range_, effect, page_url
+  - フラグ値（完全一致で比較すること）:
+    - direct_attack: '接触' or '×'
+    - finger_wag: '出る' or '出ない'
+    - protect: '－' or '通常'
+    - substitute: '－' or '通常'
+- pokemon_moves
+  - 列: pokemon_id, move_id, learn_method('基本'/'レベル'/'技マシン'), level, tm_no
+  - レベル/技マシンの片方が不可の場合、その側は -1
+
+タイプの判定について
+- types_json は JSON 文字列。JSON1 拡張の有無は環境依存のため、基本は LIKE を使用
+  - 例: types_json LIKE '%"くさ"%'
+- JSON1 が使えるかどうかは、必要に応じて sql("PRAGMA compile_options") 等で検出可能
+  - 使える場合は EXISTS(SELECT 1 FROM json_each(pokemons.types_json) …) も選択肢
+
+堅牢性のためのベストプラクティス
+1) 列名の自動検出（別名対応）
+   cols = [r["name"] for r in sql("PRAGMA table_info(pokemons)")]
+   def pick(*cands):
+       for c in cands:
+           if c in cols: return c
+       return None
+   # 例: spa_col = pick("sp_attack", "sp_atk", "spa")
+
+2) 大規模結果は LIMIT を付与し、必要に応じて ORDER BY/WHERE を加えて絞り込む
+3) 日本語値の比較は完全一致（例: direct_attack='接触'）
+4) 結果は必ず result に代入。print はログ用途で使い、最終返却値に混ぜない
+5) 無駄なデータを返さず、依頼に必要な列に整形する（例: map して name の配列に）
+
+頻出クエリテンプレート
+- タイプ判定（LIKE）
+  WHERE p.types_json LIKE '%"くさ"%'
+- JOIN（技→ポケモン）
+  FROM pokemons p
+  JOIN pokemon_moves pm ON pm.pokemon_id = p.id
+  JOIN moves m ON m.id = pm.move_id
+
+サンプル集
+1) 「ソーラービーム」を覚える草タイプ、かつ とくこう >= 100 のポケモン名（列名差異に対応）
+'''
+cols = [r["name"] for r in sql("PRAGMA table_info(pokemons)")]
+def pick(*cands):
+    for c in cands:
+        if c in cols: return c
+    return None
+spa_col = pick("sp_attack", "sp_atk", "spa")
+if spa_col is None:
+    raise ValueError("とくこう列が見つかりません")
+query = f"""
+SELECT p.*
+FROM pokemons p
+JOIN pokemon_moves pm ON pm.pokemon_id = p.id
+JOIN moves m ON m.id = pm.move_id
+WHERE m.name = ?
+  AND p.types_json LIKE ?
+  AND p.{spa_col} >= ?
+GROUP BY p.id
+ORDER BY p.{spa_col} DESC, p.name ASC
+"""
+rows = sql(query, ["ソーラービーム", '%"くさ"%', 100])
+result = [r["name"] for r in rows]
+'''
+
+2) 「接触」かつ「出る」（ゆびをふる）な技のトップ20（DPS降順）
+'''
+result = sql("""
+SELECT name, type, category, dps
+FROM moves
+WHERE direct_attack = '接触' AND finger_wag = '出る'
+ORDER BY dps DESC
+LIMIT 20
+""")
+'''
+
+3) 種族値こうげき >= 120 のポケモン（列名差異に対応）
+'''
+cols = [r["name"] for r in sql("PRAGMA table_info(pokemons)")]
+atk = "attack" if "attack" in cols else ("atk" if "atk" in cols else None)
+if atk is None:
+    raise ValueError("こうげき列が見つかりません")
+result = sql(f"SELECT name, {atk} AS atk FROM pokemons WHERE {atk}>=? ORDER BY {atk} DESC, name ASC LIMIT 50", [120])
+'''
+
+4) 技タイプごとの平均 DPS（NULL を除外）
+'''
+result = sql("""
+SELECT type, AVG(dps) AS avg_dps, COUNT(*) AS n
+FROM moves
+WHERE dps IS NOT NULL
+GROUP BY type
+ORDER BY avg_dps DESC
+""")
+'''
+
+5) 2タイプ条件（例: くさ AND フェアリー）
+'''
+result = sql("""
+SELECT name, types_json
+FROM pokemons
+WHERE types_json LIKE '%"くさ"%' AND types_json LIKE '%"フェアリー"%'
+ORDER BY name ASC
+""")
+'''
+
+注意・制限
+- 実行は 10 秒で強制終了される。重い処理（ネスト深いループ等）は避ける
+- import は不可。必要な処理は標準提供の math/statistics/json/re と SQL で完結させる
+- 返却は必ず result に代入し、JSON で返しやすい形に整える（例: 配列・辞書・数値・文字列）
+
