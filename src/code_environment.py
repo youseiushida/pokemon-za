@@ -51,6 +51,14 @@ def _safe_builtins() -> Dict[str, Any]:
         "map": map,
         "filter": filter,
         "round": round,
+        "int": int,           # 必須：整数への変換
+        "float": float,       # 浮動小数点への変換
+        "str": str,           # 文字列への変換
+        "bool": bool,         # ブール値への変換
+        "isinstance": isinstance,  # 型チェック
+        "type": type,              # 型取得
+        "divmod": divmod,     # 除算と剰余を同時に取得
+        "pow": pow,           # べき乗計算
     }
 
 
